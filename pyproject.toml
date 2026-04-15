@@ -1,0 +1,42 @@
+[project]
+name = "conf-py"
+version = "0.1.0"
+description = "Typed configuration loading from env, JSON, YAML, TOML, and Python files"
+readme = "README.md"
+authors = [
+    { name = "Ingmar Falk", email = "ingmarfalk@pm.me" }
+]
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = [
+    "dotenv>=0.9.9",
+    "pydantic>=2.13.1",
+    "pyyaml>=6.0.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/vnvmar/conf.py"
+Repository = "https://github.com/vnvmar/conf.py"
+Issues = "https://github.com/vnvmar/conf.py/issues"
+
+[build-system]
+requires = ["uv_build>=0.11.3,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "conf"
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.39.0",
+    "pytest>=9.0.3",
+]
