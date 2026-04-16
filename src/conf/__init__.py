@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import pathlib
 import types
 import typing
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Callable, Sequence
 
 import dotenv
@@ -18,79 +17,70 @@ __all__ = ["Config", "ConfValue", "environ"]
 
 
 _ConfigData: typing.TypeAlias = dict[str, object]
-
-
-def _json_loads(value: str) -> object:
-    return typing.cast(object, json.loads(value))
-
-
-def _validate_one_of(value: str, values: Sequence[str | None]) -> "ConfValue | None":
-    nullable = None in values
-    allowed = frozenset(item for item in values if item is not None)
-
-    if value in allowed:
-        return ConfValue(value)
-    if nullable:
-        return None
-
-    choices = " | ".join(f'"{item}"' for item in sorted(allowed))
-    raise ValueError(f"Value '{value}' is not one of the allowed choices: {choices}.")
+_Converter: typing.TypeAlias = Callable[[str], object]
 
 
 class ConfValue(str):
     """String value returned from configuration lookups."""
 
     @typing.overload
-    def to(self, target: type[str], *, sep: str = ",") -> str: ...
+    def to(self, target: type[str]) -> str: ...
 
     @typing.overload
-    def to(self, target: type[bool], *, sep: str = ",") -> bool: ...
+    def to(self, target: type[bool]) -> bool: ...
 
     @typing.overload
-    def to(self, target: type[int], *, sep: str = ",") -> int: ...
+    def to(self, target: type[int]) -> int: ...
 
     @typing.overload
-    def to(self, target: type[float], *, sep: str = ",") -> float: ...
+    def to(self, target: type[float]) -> float: ...
 
     @typing.overload
     def to(self, target: type[list[object]], *, sep: str = ",") -> list[str]: ...
 
     @typing.overload
-    def to(self, target: type[dict[str, object]], *, sep: str = ",") -> dict[str, object]: ...
+    def to(self, target: type[dict[str, object]]) -> dict[str, object]: ...
 
     @typing.overload
-    def to(self, target: type[object], *, sep: str = ",") -> object: ...
+    def to(self, target: type[object]) -> object: ...
 
     @typing.overload
-    def to[_T](self, target: Callable[[str], _T], *, sep: str = ",") -> _T: ...
+    def to[_T](self, target: Callable[[str], _T]) -> _T: ...
 
     @typing.overload
     def to(self, target: object, *, sep: str = ",") -> object: ...
 
     def to(self, target: object, *, sep: str = ",") -> object:
-        if target is str:
-            return str(self)
-        if target is bool:
-            return self._to_bool()
-        if target is list:
-            return self._to_list(sep=sep)
-        if target is dict:
-            parsed = _json_loads(self)
-            if not isinstance(parsed, dict):
-                raise ValueError(f"Cannot parse '{self}' as dict.")
-            return typing.cast(dict[str, object], parsed)
-        if target is object:
-            return _json_loads(self)
+        converters: dict[object, _Converter] = {
+            str: str,
+            bool: lambda value: ConfValue(value)._to_bool(),
+            list: lambda value: ConfValue(value)._to_list(sep=sep),
+            dict: self._to_dict,
+            object: json.loads,
+        }
+
+        converter = converters.get(target)
+        if converter is not None:
+            return converter(str(self))
+
         if not callable(target):
             raise TypeError("ConfValue.to() expects a type or callable converter.")
-        converter = typing.cast(Callable[[str], object], target)
+
+        converter = typing.cast(_Converter, target)
         return converter(str(self))
+
+    @staticmethod
+    def _to_dict(value: str) -> dict[str, object]:
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Cannot parse '{value}' as dict.")
+        return typing.cast(dict[str, object], parsed)
 
     def _to_list(self, sep: str = ",") -> list[str]:
         stripped = self.strip()
         if stripped.startswith("["):
             try:
-                parsed = _json_loads(stripped)
+                parsed = json.loads(self)
             except json.JSONDecodeError:
                 parsed = None
             if isinstance(parsed, list):
@@ -106,13 +96,31 @@ class ConfValue(str):
         raise ValueError(f"Cannot parse '{self}' as boolean.")
 
     def one_of(self, *values: str | None) -> "ConfValue | None":
-        return _validate_one_of(self, values)
+        nullable = None in values
+        allowed = frozenset(item for item in values if item is not None)
+
+        if self in allowed:
+            return ConfValue(self)
+        if nullable:
+            return None
+
+        choices = " | ".join(f'"{item}"' for item in sorted(allowed))
+        raise ValueError(f"Value '{self}' is not one of the allowed choices: {choices}.")
 
     def __and__(self, values: Sequence[str | None]) -> "ConfValue | None":
-        return _validate_one_of(self, values)
+        return self.one_of(*values)
 
     def __getattr__(self, name: str) -> "ConfValue":
         raise AttributeError(f"'{self}' is a configuration value, not a namespace. Cannot access '{name}' on it.")
+
+
+# --------------- beg: Helpers --------------
+
+def _is_string_dict(data: object) -> typing.TypeGuard[_ConfigData]:
+    if not isinstance(data, dict):
+        return False
+    mapping = typing.cast(dict[object, object], data)
+    return all(isinstance(key, str) for key in mapping)
 
 
 def _normalise_key(name: str) -> str:
@@ -132,40 +140,33 @@ def _normalise_data(data: object) -> object:
         return [_normalise_data(item) for item in typing.cast(list[object], data)]
     return data
 
-
-def _is_string_dict(data: object) -> typing.TypeGuard[_ConfigData]:
-    if not isinstance(data, dict):
-        return False
-    mapping = typing.cast(dict[object, object], data)
-    return all(isinstance(key, str) for key in mapping)
-
+# --------------- end: Helpers --------------
 
 class _Loader(ABC):
-    @property
-    def flat(self) -> bool:
-        return False
+    flat: typing.ClassVar[bool] = False
 
-    @abstractmethod
-    def load(self, path: pathlib.Path) -> _ConfigData:
+    @classmethod
+    def load(cls, path: pathlib.Path) -> _ConfigData:
         ...
 
 
-class _DotenvLoader(_Loader):
-    @property
-    @typing.override
-    def flat(self) -> bool:
-        return True
+class DotenvLoader(_Loader):
+    flat: typing.ClassVar[bool] = True
 
     @typing.override
-    def load(self, path: pathlib.Path) -> _ConfigData:
+    @classmethod
+    def load(cls, path: pathlib.Path) -> _ConfigData:
         if not dotenv.load_dotenv(path):
             raise RuntimeError(f"Failed loading environment file '{path.resolve()}'.")
         return dict(os.environ)
 
 
-class _YamlLoader(_Loader):
+class YamlLoader(_Loader):
+    flat: typing.ClassVar[bool] = False
+
     @typing.override
-    def load(self, path: pathlib.Path) -> _ConfigData:
+    @classmethod
+    def load(cls, path: pathlib.Path) -> _ConfigData:
         import yaml
 
         with open(path) as file:
@@ -175,9 +176,12 @@ class _YamlLoader(_Loader):
         return data
 
 
-class _TomlLoader(_Loader):
+class TomlLoader(_Loader):
+    flat: typing.ClassVar[bool] = False
+
     @typing.override
-    def load(self, path: pathlib.Path) -> _ConfigData:
+    @classmethod
+    def load(cls, path: pathlib.Path) -> _ConfigData:
         import tomllib
 
         with open(path, "rb") as file:
@@ -190,69 +194,25 @@ class _TomlLoader(_Loader):
         return data
 
 
-class _JsonLoader(_Loader):
+class JsonLoader(_Loader):
+    flat: typing.ClassVar[bool] = False
+
     @typing.override
-    def load(self, path: pathlib.Path) -> _ConfigData:
+    @classmethod
+    def load(cls, path: pathlib.Path) -> _ConfigData:
         with open(path) as file:
-            data = _json_loads(file.read())
+            data = json.loads(file.read())
         if not _is_string_dict(data):
             raise ValueError(f"JSON file must contain an object, got {type(data).__name__}.")
         return data
 
 
-class _PythonLoader(_Loader):
-    @typing.override
-    def load(self, path: pathlib.Path) -> _ConfigData:
-        module = ast.parse(path.read_text(), filename=str(path))
-        data: _ConfigData = {}
-
-        for statement in module.body:
-            if isinstance(statement, ast.Assign):
-                value = self._literal(statement.value)
-                for target in statement.targets:
-                    if isinstance(target, ast.Name) and not target.id.startswith("_"):
-                        data[target.id] = value
-                    elif not isinstance(target, ast.Name):
-                        raise ValueError("Python config assignments must target simple names.")
-                continue
-
-            if isinstance(statement, ast.AnnAssign):
-                if statement.value is None:
-                    continue
-                if not isinstance(statement.target, ast.Name):
-                    raise ValueError("Python config assignments must target simple names.")
-                if not statement.target.id.startswith("_"):
-                    data[statement.target.id] = self._literal(statement.value)
-                continue
-
-            if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant) and isinstance(statement.value.value, str):
-                continue
-
-            raise ValueError("Python config files may only contain literal assignments.")
-
-        return data
-
-    @staticmethod
-    def _literal(node: ast.AST) -> object:
-        try:
-            value = typing.cast(object, ast.literal_eval(node))
-        except (ValueError, TypeError) as exc:
-            raise ValueError("Python config values must be literals.") from exc
-        if isinstance(value, dict):
-            mapping = typing.cast(object, value)
-            if not _is_string_dict(mapping):
-                raise ValueError("Python config dictionaries must use string keys.")
-            return mapping
-        return value
-
-
-_LOADERS: dict[str, _Loader] = {
-    ".env": _DotenvLoader(),
-    ".yaml": _YamlLoader(),
-    ".yml": _YamlLoader(),
-    ".json": _JsonLoader(),
-    ".toml": _TomlLoader(),
-    ".py": _PythonLoader(),
+_LOADERS: dict[str, type[_Loader]] = {
+    ".env": DotenvLoader,
+    ".yaml": YamlLoader,
+    ".yml": YamlLoader,
+    ".json": JsonLoader,
+    ".toml": TomlLoader,
 }
 
 
@@ -271,38 +231,21 @@ def _annotation_allows_none(annotation: object) -> bool:
     return False
 
 
-def _list_item_model(annotation: object) -> type[BaseModel] | None:
-    origin = typing.cast(object, typing.get_origin(annotation))
-    if origin is not list and origin is not Sequence:
-        return None
-
-    args = typing.cast(tuple[object, ...], typing.get_args(annotation))
-    if len(args) != 1:
-        return None
-
-    item_type = args[0]
-    return item_type if _is_base_model_type(item_type) else None
-
-
-def _decode_flat_value(value: object) -> object:
-    if not isinstance(value, str):
-        return value
-
-    stripped = value.strip()
-    if stripped.startswith(("{", "[")):
-        try:
-            return _json_loads(stripped)
-        except json.JSONDecodeError:
-            return value
-
-    return value
-
-
 def _remap_value_for_model(value: object, annotation: object) -> object:
     if _is_base_model_type(annotation) and _is_string_dict(value):
         return _model_input_from_mapping(value, annotation)
 
-    item_model = _list_item_model(annotation)
+    origin = typing.cast(object, typing.get_origin(annotation))
+    if origin is not list and origin is not Sequence:
+        return value
+
+    args = typing.cast(tuple[object, ...], typing.get_args(annotation))
+    if len(args) != 1:
+        return value
+
+    item_type = args[0]
+    item_model = item_type if _is_base_model_type(item_type) else None
+
     if item_model is not None and isinstance(value, list):
         return [
             _model_input_from_mapping(item, item_model) if _is_string_dict(item) else item
@@ -312,26 +255,37 @@ def _remap_value_for_model(value: object, annotation: object) -> object:
     return value
 
 
-def _mapping_value_for_field(data: _ConfigData, field_name: str) -> tuple[bool, object]:
-    key = _normalise_key(field_name)
-    for candidate, value in data.items():
-        if _normalise_key(candidate) == key:
-            return True, value
-    return False, None
-
-
 def _model_input_from_mapping(data: _ConfigData, model: type[BaseModel]) -> _ConfigData:
     model_input: _ConfigData = {}
 
     for field_name, field_info in model.model_fields.items():
         annotation = typing.cast(object, field_info.annotation)
-        exists, value = _mapping_value_for_field(data, field_name)
+        exists, value = False, None
+        key = _normalise_key(field_name)
+        for candidate, value in data.items():
+            if _normalise_key(candidate) == key:
+                exists, value = True, value
+                break
         if exists:
             model_input[field_name] = _remap_value_for_model(value, annotation)
         elif _annotation_allows_none(annotation):
             model_input[field_name] = None
 
     return model_input
+
+
+def _decode_flat_value(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+
+    stripped = value.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return value
+
+    return value
 
 
 def _flat_model_input(
@@ -365,6 +319,11 @@ def _flat_model_input(
 
 
 class _Scope:
+    _data: _ConfigData
+    _flat: bool
+    _prefix: str
+    _cache: dict[str, ConfValue]
+
     def __init__(
         self,
         data: _ConfigData,
@@ -372,10 +331,10 @@ class _Scope:
         flat: bool = False,
         prefix: str = "",
     ) -> None:
-        self._data: _ConfigData = data
-        self._flat: bool = flat
-        self._prefix: str = prefix
-        self._cache: dict[str, ConfValue] = {}
+        self._data = data
+        self._flat = flat
+        self._prefix = prefix
+        self._cache = {}
 
     def _resolve(self, name: str) -> ConfValue:
         key = _normalise_key(name)
@@ -390,12 +349,12 @@ class _Scope:
             if any(key.startswith(prefix_probe) for key in self._data):
                 return typing.cast(ConfValue, typing.cast(object, _Scope(self._data, flat=True, prefix=full_key)))
 
-            raise EnvironmentError(f"Missing environment variable '{full_key}'.")
+            raise KeyError(f"Missing configuration variable '{full_key}'.")
 
         value = self._data.get(key)
         if value is None:
             label = f" in scope '{self._prefix}'" if self._prefix else ""
-            raise EnvironmentError(f"Missing configuration key '{key}'{label}.")
+            raise KeyError(f"Missing configuration key '{key}'{label}.")
 
         if isinstance(value, dict):
             child_prefix = f"{self._prefix}.{key}" if self._prefix else key
@@ -461,6 +420,12 @@ _MaybeScopeResult: typing.TypeAlias = "ConfValue | type[_NullScope]"
 
 
 class _MaybeScope:
+    _data: _ConfigData
+    _flat: bool
+    _prefix: str
+    _cache: dict[str, _MaybeScopeResult]
+    _resolved: set[str]
+
     def __init__(
         self,
         data: _ConfigData,
@@ -468,11 +433,11 @@ class _MaybeScope:
         flat: bool = False,
         prefix: str = "",
     ) -> None:
-        self._data: _ConfigData = data
-        self._flat: bool = flat
-        self._prefix: str = prefix
-        self._cache: dict[str, _MaybeScopeResult] = {}
-        self._resolved: set[str] = set()
+        self._data = data
+        self._flat = flat
+        self._prefix = prefix
+        self._cache = {}
+        self._resolved = set()
 
     def _resolve(self, name: str) -> _MaybeScopeResult:
         key = _normalise_key(name)
@@ -524,9 +489,12 @@ class _MaybeScope:
 
 class Config(_Scope):
     """Load configuration from a file and expose values through attributes."""
+    path: pathlib.Path
+    _model_data: _ConfigData
+    _maybe: _MaybeScope | None
 
     def __init__(self, path: str | pathlib.Path = ".env") -> None:
-        self.path: pathlib.Path = pathlib.Path(path)
+        self.path = pathlib.Path(path)
 
         if not self.path.is_file():
             raise FileNotFoundError(f"Configuration file '{self.path.resolve()}' not found.")
@@ -536,10 +504,10 @@ class Config(_Scope):
             raise ValueError(f"Unsupported file type for configuration: '{self.path.suffix}'.")
 
         data = loader.load(self.path)
-        self._model_data: _ConfigData = data
+        self._model_data = data
         scope_data = data if loader.flat else typing.cast(_ConfigData, _normalise_data(data))
         super().__init__(scope_data, flat=loader.flat)
-        self._maybe: _MaybeScope | None = None
+        self._maybe = None
 
     @property
     def maybe(self) -> _MaybeScope:

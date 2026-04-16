@@ -1,7 +1,7 @@
 [project]
-name = "conf-py"
+name = "conf"
 version = "0.1.0"
-description = "Typed configuration loading from env, JSON, YAML, TOML, and Python files"
+description = "Typed configuration loading from env, JSON, YAML, and TOML"
 readme = "README.md"
 authors = [
     { name = "Ingmar Falk", email = "ingmarfalk@pm.me" }
@@ -14,7 +14,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
 dependencies = [

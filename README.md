@@ -1,8 +1,8 @@
 # conf
 
 `conf` is a small Python configuration loader. It reads configuration from
-`*.env`, JSON, YAML, TOML, and safe literal Python files, then exposes values
-through cached attribute access.
+`*.env`, JSON, YAML, and TOML, then exposes values through cached attribute
+access.
 
 The casing to access these fields does not matter, as they are normalised internally.
 
@@ -84,19 +84,6 @@ class Settings(BaseModel):
 
 settings = Config("config.toml").load(Settings)
 ```
-
-## Python Config Files
-
-Python config files are parsed with `ast.literal_eval`; they are not executed.
-Only top-level literal assignments are allowed:
-
-```python
-DEBUG = True
-PORT = 8000
-API = {"token": "secret"}
-```
-
-Imports, function calls, and other executable code raise `ValueError`.
 
 ## Development
 

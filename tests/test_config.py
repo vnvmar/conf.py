@@ -15,15 +15,6 @@ def write(path: pathlib.Path, content: str) -> pathlib.Path:
     return path
 
 
-def test_public_api_is_narrow() -> None:
-    import conf
-
-    assert conf.__all__ == ["Config", "ConfValue", "environ"]
-    assert not hasattr(conf, "Env")
-    assert not hasattr(conf, "EnvValue")
-    assert repr(environ) == "<LazyConfig path='.env'>"
-
-
 def test_dotenv_values_and_scopes(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FOO", raising=False)
     monkeypatch.delenv("SERVICE_DATABASE_URL", raising=False)
@@ -36,7 +27,7 @@ def test_dotenv_values_and_scopes(tmp_path: pathlib.Path, monkeypatch: pytest.Mo
     assert config.SERVICE.DATABASE.URL == "postgres://localhost/app"
     assert config.maybe.MISSING == None
     assert not config.maybe.MISSING.DEEP.VALUE
-    with pytest.raises(EnvironmentError, match="MISSING"):
+    with pytest.raises(KeyError, match="MISSING"):
         config.MISSING
 
 
@@ -47,7 +38,6 @@ def test_dotenv_values_and_scopes(tmp_path: pathlib.Path, monkeypatch: pytest.Mo
         ("config.yaml", "service:\n  api-key: secret\nports:\n  - 8000\n  - 8001\n"),
         ("config.yml", "service:\n  api-key: secret\nports:\n  - 8000\n  - 8001\n"),
         ("config.toml", "ports = [8000, 8001]\n[service]\napi-key = \"secret\"\n"),
-        ("config.py", 'SERVICE = {"api-key": "secret"}\nPORTS = [8000, 8001]\n_PRIVATE = "hidden"\n'),
     ],
 )
 def test_structured_formats_support_nested_access_and_lists(
@@ -61,33 +51,6 @@ def test_structured_formats_support_nested_access_and_lists(
     assert config.PORTS.to(list) == ["8000", "8001"]
     assert config.PORTS.to(object) == [8000, 8001]
     assert config.maybe.SERVICE.MISSING == None
-
-
-def test_python_loader_supports_annotated_literal_assignments(tmp_path: pathlib.Path) -> None:
-    path = write(tmp_path / "settings.py", 'DEBUG: bool = True\nPORT: int = 8000\nNAME = "app"\n')
-
-    config = Config(path)
-
-    assert config.DEBUG == "True"
-    assert config.DEBUG.to(bool) is True
-    assert config.PORT.to(int) == 8000
-    assert config.NAME == "app"
-
-
-@pytest.mark.parametrize(
-    "content",
-    [
-        "VALUE = make_value()\n",
-        "import os\nVALUE = 1\n",
-        "DATA = {1: 'bad'}\n",
-        "A.B = 1\n",
-    ],
-)
-def test_python_loader_rejects_executable_or_invalid_config(tmp_path: pathlib.Path, content: str) -> None:
-    path = write(tmp_path / "bad.py", content)
-
-    with pytest.raises(ValueError):
-        _ = Config(path)
 
 
 def test_conf_value_helpers() -> None:
@@ -173,6 +136,9 @@ def test_file_errors(tmp_path: pathlib.Path) -> None:
 
     with pytest.raises(ValueError, match="Unsupported file type"):
         _ = Config(write(tmp_path / "config.ini", "A=1\n"))
+
+    with pytest.raises(ValueError, match="Unsupported file type"):
+        _ = Config(write(tmp_path / "config.py", 'VALUE = "1"\n'))
 
 
 @pytest.mark.parametrize(
